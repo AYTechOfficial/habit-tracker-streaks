@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
 // --- Types ---
 interface Habit {
@@ -20,21 +20,15 @@ interface AppState {
   last_sync_timestamp: number;
 }
 
-interface Draft {
-  name: string;
-  time: string;
-}
-
-// --- Constants & Helpers ---
+// --- Constants ---
 const STORAGE_KEYS = {
   HABITS: 'habits',
   APP_STATE: 'app_state',
-  DRAFT: 'draft_habit',
 };
 
-const COLORS = {
+const THEME = {
   bg: '#F8FAFC',
-  surface: '#FFFFFF',
+  card: '#FFFFFF',
   primary: '#3B82F6',
   success: '#10B981',
   reschedule: '#F59E0B',
@@ -43,338 +37,314 @@ const COLORS = {
   border: '#E2E8F0',
 };
 
-const getHabits = (): Habit[] => {
-  try {
-    const data = localStorage.getItem(STORAGE_KEYS.HABITS);
-    return data ? JSON.parse(data) : [];
-  } catch {
-    return [];
-  }
+// --- Helpers ---
+const generateId = () => Math.random().toString(36).substr(2, 9);
+const formatDate = (date: Date) => date.toISOString();
+
+const isOverdue = (habit: Habit): boolean => {
+  if (!habit.last_completed_date) return true;
+  const lastDate = new Date(habit.last_completed_date);
+  const now = new Date();
+  const diffMs = now.getTime() - lastDate.getTime();
+  return diffMs > 24 * 60 * 60 * 1000;
 };
 
-const saveHabits = (habits: Habit[]): boolean => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.HABITS, JSON.stringify(habits));
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const getAppState = (): AppState => {
-  try {
-    const data = localStorage.getItem(STORAGE_KEYS.APP_STATE);
-    return data 
-      ? JSON.parse(data) 
-      : { 
-          notification_permission: 'default', 
-          theme: 'light', 
-          timezone_offset: new Date().getTimezoneOffset(), 
-          last_sync_timestamp: Date.now() 
-        };
-  } catch {
-    return { 
-      notification_permission: 'default', 
-      theme: 'light', 
-      timezone_offset: new Date().getTimezoneOffset(), 
-      last_sync_timestamp: Date.now() 
-    };
-  }
-};
-
-const getDraft = (): Draft => {
-  try {
-    const data = localStorage.getItem(STORAGE_KEYS.DRAFT);
-    return data ? JSON.parse(data) : { name: '', time: '' };
-  } catch {
-    return { name: '', time: '' };
-  }
-};
-
-const saveDraft = (draft: Draft) => {
-  try {
-    localStorage.setItem(STORAGE_KEYS.DRAFT, JSON.stringify(draft));
-  } catch {}
-};
-
-const clearDraft = () => {
-  try {
-    localStorage.removeItem(STORAGE_KEYS.DRAFT);
-  } catch {}
-};
-
-// --- Component ---
-export default function ScaffoldPage() {
-  const [view, setView] = useState<'dashboard' | 'new'>('dashboard');
+export default function Page() {
   const [habits, setHabits] = useState<Habit[]>([]);
-  const [appState, setAppState] = useState<AppState>(getAppState());
-  const [draftName, setDraftName] = useState('');
-  const [draftTime, setDraftTime] = useState('');
-  const [storageError, setStorageError] = useState(false);
+  const [view, setView] = useState<'dashboard' | 'new'>('dashboard');
+  const [toast, setToast] = useState<{ message: string; visible: boolean }>({ message: '', visible: false });
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  
+  // Form State
+  const [formName, setFormName] = useState('');
+  const [formTime, setFormTime] = useState('');
 
-  // Initialize state and handle nudge scheduling on mount
+  // Load from localStorage on mount
   useEffect(() => {
-    const loadedHabits = getHabits();
-    setHabits(loadedHabits);
+    try {
+      const storedHabits = localStorage.getItem(STORAGE_KEYS.HABITS);
+      const storedState = localStorage.getItem(STORAGE_KEYS.APP_STATE);
+      
+      if (storedHabits) {
+        const parsed = JSON.parse(storedHabits);
+        if (Array.isArray(parsed)) setHabits(parsed);
+      }
+      
+      if (storedState) {
+        const parsedState = JSON.parse(storedState);
+        if (parsedState?.notification_permission === 'granted') {
+          scheduleNudges();
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load state', e);
+      setErrorBanner('Failed to load previous data. Starting fresh.');
+    }
 
-    const draft = getDraft();
-    setDraftName(draft.name);
-    setDraftTime(draft.time);
-
-    // Automated Nudge Scheduling
-    const now = new Date();
-    const dueHabits = loadedHabits.filter(h => new Date(h.reminder_time) <= now);
-
-    if (dueHabits.length > 0 && appState.notification_permission !== 'granted') {
-      setTimeout(() => {
-        Notification.requestPermission().then(perm => {
-          setAppState(prev => ({ ...prev, notification_permission: perm }));
-          if (perm === 'granted') {
-            // Display toast within 5 seconds of trigger
-            setTimeout(() => {
-              dueHabits.forEach(h => {
-                alert(`Nudge: ${h.name}`);
-              });
-            }, 2000);
-          }
-        }).catch(() => {});
-      }, 2000);
+    // Handle reload mid-flow
+    if (window.location.hash === '#new') {
+      setView('new');
     }
   }, []);
 
-  // Persist habits when they change
+  // Persist to localStorage on change
   useEffect(() => {
-    const success = saveHabits(habits);
-    if (!success) setStorageError(true);
+    try {
+      localStorage.setItem(STORAGE_KEYS.HABITS, JSON.stringify(habits));
+    } catch (e) {
+      console.error('Storage write failed', e);
+      setErrorBanner('Storage quota exceeded. Please clear some data.');
+    }
   }, [habits]);
 
-  // Persist draft when view is 'new' or inputs change
-  useEffect(() => {
-    if (view === 'new') {
-      saveDraft({ name: draftName, time: draftTime });
-    } else {
-      clearDraft();
-    }
-  }, [view, draftName, draftTime]);
+  // Nudge Scheduler
+  const scheduleNudges = useCallback(async () => {
+    const now = new Date();
+    const overdueHabits = habits.filter(h => new Date(h.reminder_time) <= now);
+    
+    if (overdueHabits.length === 0) return;
 
-  const handleToggle = (id: string) => {
+    try {
+      setTimeout(async () => {
+        const permission = await Notification.requestPermission();
+        if (permission === 'granted') {
+          setTimeout(() => {
+            overdueHabits.forEach(h => {
+              new Notification('Scaffold Nudge', { body: `Time for ${h.name}` });
+              showToast(`Nudge sent for ${h.name}`);
+            });
+          }, 2000); // Within 5 seconds of trigger
+        }
+      }, 1000); // Within 2 seconds of mount
+    } catch (e) {
+      console.error('Notification error', e);
+    }
+  }, [habits]);
+
+  // Run nudges periodically if permission already granted
+  useEffect(() => {
+    if (Notification.permission === 'granted') {
+      scheduleNudges();
+    }
+  }, [scheduleNudges]);
+
+  const showToast = (msg: string) => {
+    setToast({ message: msg, visible: true });
+    setTimeout(() => setToast({ message: '', visible: false }), 3000);
+  };
+
+  const handleComplete = (id: string) => {
     setHabits(prev => prev.map(h => {
-      if (h.id === id) {
-        const now = new Date().toISOString();
-        return { ...h, streak: h.streak + 1, last_completed_date: now, miss_logged: false };
-      }
-      return h;
+      if (h.id !== id) return h;
+      return {
+        ...h,
+        streak: h.streak + 1,
+        last_completed_date: formatDate(new Date()),
+        miss_logged: false,
+      };
     }));
   };
 
   const handleReschedule = (id: string) => {
     setHabits(prev => prev.map(h => {
-      if (h.id === id) {
-        const currentReminder = new Date(h.reminder_time);
-        const newReminder = new Date(currentReminder.getTime() + 24 * 60 * 60 * 1000).toISOString();
-        return { ...h, reminder_time: newReminder, miss_logged: true };
-      }
-      return h;
+      if (h.id !== id) return h;
+      const nextReminder = new Date(h.reminder_time);
+      nextReminder.setHours(nextReminder.getHours() + 24);
+      return {
+        ...h,
+        reminder_time: formatDate(nextReminder),
+        miss_logged: true,
+        // Streak remains untouched per spec
+      };
     }));
   };
 
-  const handleSaveHabit = () => {
-    if (!draftName.trim()) return;
-    
+  const handleSaveHabit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formName.trim()) return;
+
     const newHabit: Habit = {
-      id: crypto.randomUUID(),
-      name: draftName,
-      reminder_time: draftTime || new Date().toISOString(),
+      id: generateId(),
+      name: formName.trim(),
+      reminder_time: formTime || formatDate(new Date()),
       streak: 0,
       miss_logged: false,
       last_completed_date: null,
-      created_at: new Date().toISOString(),
+      created_at: formatDate(new Date()),
     };
 
     setHabits(prev => [...prev, newHabit]);
-    setDraftName('');
-    setDraftTime('');
+    setFormName('');
+    setFormTime('');
     setView('dashboard');
-  };
-
-  const handleCancel = () => {
-    setView('dashboard');
-  };
-
-  const isMissed = (habit: Habit) => {
-    if (!habit.last_completed_date) return true;
-    const last = new Date(habit.last_completed_date);
-    const now = new Date();
-    return (now.getTime() - last.getTime()) > 24 * 60 * 60 * 1000;
-  };
-
-  const isCompletedToday = (habit: Habit) => {
-    if (!habit.last_completed_date) return false;
-    const last = new Date(habit.last_completed_date);
-    const now = new Date();
-    return last.toDateString() === now.toDateString();
   };
 
   return (
-    <div 
-      style={{ 
-        backgroundColor: COLORS.bg, 
-        minHeight: '100vh', 
-        fontFamily: 'Inter, system-ui, sans-serif', 
-        color: COLORS.textPrimary,
-        fontSize: '16px',
-        lineHeight: '1.625'
-      }}
-    >
-      {/* Header */}
-      <header className="p-6 flex justify-between items-center">
-        <h1 className="text-2xl font-semibold">Scaffold</h1>
-        {view === 'dashboard' && (
-          <button 
-            onClick={() => setView('new')}
-            style={{ backgroundColor: COLORS.primary, color: 'white' }}
-            className="px-4 py-2 rounded-md shadow-sm hover:opacity-90 transition-opacity font-normal"
-          >
-            Create Habit
-          </button>
-        )}
-      </header>
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: ${THEME.bg}; }
+      `}</style>
+      <div className="min-h-screen leading-relaxed">
+        {/* Header */}
+        <header className="max-w-2xl mx-auto p-6 flex justify-between items-center">
+          <h1 className="text-2xl font-semibold" style={{ color: THEME.textPrimary }}>Scaffold</h1>
+          {view === 'dashboard' && (
+            <button 
+              onClick={() => setView('new')}
+              style={{ backgroundColor: THEME.primary, color: '#fff' }}
+              className="px-4 py-2 rounded-md shadow-sm hover:opacity-90 transition-opacity"
+            >
+              Create Habit
+            </button>
+          )}
+        </header>
 
-      <main className="max-w-4xl mx-auto p-4 space-y-6">
-        {view === 'dashboard' && (
-          <>
-            {habits.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
-                <h2 className="text-xl font-semibold" style={{ color: COLORS.textPrimary }}>
-                  Your routine starts here.
-                </h2>
-                <p className="text-lg" style={{ color: COLORS.textSecondary }}>
-                  Add your first habit to get started.
-                </p>
-                <button 
-                  onClick={() => setView('new')}
-                  style={{ backgroundColor: COLORS.primary, color: 'white' }}
-                  className="px-6 py-3 rounded-md shadow-sm hover:opacity-90 transition-opacity font-normal"
-                >
-                  Create Habit
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {habits.map(habit => {
-                  const missed = isMissed(habit);
-                  const completed = isCompletedToday(habit);
-                  
-                  return (
-                    <div 
-                      key={habit.id} 
-                      className="p-6 bg-white rounded-lg shadow-sm border transition-colors duration-200"
-                      style={{ 
-                        borderColor: completed ? COLORS.success : COLORS.border,
-                        borderWidth: completed ? '2px' : '1px'
-                      }}
-                    >
-                      <div className="flex justify-between items-start gap-4">
-                        <div className="flex-1 min-w-0">
-                          <h3 className="text-lg font-semibold truncate" title={habit.name}>
-                            {habit.name}
-                          </h3>
-                          <p className="text-sm mt-1" style={{ color: COLORS.textSecondary }}>
-                            Streak: {habit.streak} day{habit.streak !== 1 ? 's' : ''}
-                          </p>
-                        </div>
-                        
-                        {missed ? (
-                          <button 
-                            onClick={() => handleReschedule(habit.id)}
-                            style={{ backgroundColor: COLORS.reschedule, color: 'white' }}
-                            className="px-3 py-1.5 rounded-md text-sm hover:opacity-90 transition-opacity font-normal whitespace-nowrap"
-                          >
-                            Reschedule
-                          </button>
-                        ) : (
-                          <button 
-                            onClick={() => handleToggle(habit.id)}
-                            disabled={completed}
-                            style={{ 
-                              backgroundColor: completed ? COLORS.success : 'transparent', 
-                              color: completed ? 'white' : COLORS.primary, 
-                              borderColor: COLORS.primary,
-                              borderWidth: '1px'
-                            }}
-                            className={`px-3 py-1.5 rounded-md text-sm border transition-colors font-normal whitespace-nowrap ${completed ? 'cursor-default' : 'hover:bg-blue-50'}`}
-                          >
-                            {completed ? 'Completed' : 'Mark Done'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
-
-        {view === 'new' && (
-          <div className="p-6 bg-white rounded-lg shadow-sm max-w-md mx-auto">
-            <h2 className="text-xl font-semibold mb-4">New Habit</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium mb-1" style={{ color: COLORS.textSecondary }}>
-                  Habit Name
-                </label>
-                <input 
-                  type="text" 
-                  value={draftName}
-                  onChange={e => setDraftName(e.target.value)}
-                  className="w-full p-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-200"
-                  style={{ borderColor: COLORS.border }}
-                  placeholder="e.g., Drink water"
-                  autoFocus
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1" style={{ color: COLORS.textSecondary }}>
-                  Reminder Time
-                </label>
-                <input 
-                  type="datetime-local" 
-                  value={draftTime}
-                  onChange={e => setDraftTime(e.target.value)}
-                  className="w-full p-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-200"
-                  style={{ borderColor: COLORS.border }}
-                />
-              </div>
-              <div className="flex justify-end space-x-2 pt-4">
-                <button 
-                  onClick={handleCancel}
-                  className="px-4 py-2 rounded-md hover:bg-gray-50 transition-colors font-normal"
-                  style={{ color: COLORS.textSecondary }}
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={handleSaveHabit}
-                  style={{ backgroundColor: COLORS.primary, color: 'white' }}
-                  className="px-4 py-2 rounded-md hover:opacity-90 transition-opacity font-normal"
-                >
-                  Save
-                </button>
-              </div>
+        <main className="max-w-2xl mx-auto p-4 space-y-6">
+          
+          {/* Error Banner */}
+          {errorBanner && (
+            <div className="p-4 rounded-md border" style={{ borderColor: THEME.reschedule, backgroundColor: `${THEME.reschedule}10` }}>
+              {errorBanner}
             </div>
-          </div>
-        )}
-      </main>
+          )}
 
-      {storageError && (
-        <div 
-          className="fixed bottom-4 left-4 p-4 rounded-md shadow-sm z-50"
-          style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
-        >
-          Storage quota exceeded. Please clear some data.
-        </div>
-      )}
-    </div>
+          {/* Toast */}
+          {toast.visible && (
+            <div className="fixed bottom-4 right-4 p-4 rounded-md shadow-lg z-50" style={{ backgroundColor: THEME.card, color: THEME.textPrimary }}>
+              {toast.message}
+            </div>
+          )}
+
+          {/* Dashboard View */}
+          {view === 'dashboard' && (
+            <>
+              {habits.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center space-y-4">
+                  <h2 className="text-xl font-semibold" style={{ color: THEME.textPrimary }}>Your routine starts here.</h2>
+                  <p style={{ color: THEME.textSecondary }}>Add your first habit to get started.</p>
+                  <button 
+                    onClick={() => setView('new')}
+                    style={{ backgroundColor: THEME.primary, color: '#fff' }}
+                    className="px-6 py-3 rounded-md shadow-sm hover:opacity-90 transition-opacity"
+                  >
+                    Create Habit
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {habits.map(habit => {
+                    const overdue = isOverdue(habit);
+                    const completedToday = habit.last_completed_date && new Date(habit.last_completed_date).toDateString() === new Date().toDateString();
+                    
+                    return (
+                      <div 
+                        key={habit.id} 
+                        className="p-6 rounded-lg shadow-sm flex justify-between items-center transition-all duration-200"
+                        style={{ 
+                          backgroundColor: THEME.card, 
+                          borderColor: completedToday ? THEME.success : THEME.border,
+                          borderWidth: completedToday ? '2px' : '1px',
+                          borderStyle: 'solid'
+                        }}
+                      >
+                        <div className="flex-1 min-w-0 mr-4">
+                          <h3 className="font-semibold truncate" style={{ color: THEME.textPrimary }}>{habit.name}</h3>
+                          <p className="text-sm mt-1" style={{ color: THEME.textSecondary }}>
+                            Streak: {habit.streak} days
+                          </p>
+                          {overdue && !completedToday && (
+                            <p className="text-xs mt-1 italic" style={{ color: THEME.reschedule }}>Missed yesterday</p>
+                          )}
+                        </div>
+
+                        <div className="flex flex-col items-end gap-2">
+                          {completedToday ? (
+                            <span className="px-3 py-1 rounded-full text-sm font-medium" style={{ backgroundColor: `${THEME.success}20`, color: THEME.success }}>
+                              Completed
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleComplete(habit.id)}
+                              disabled={overdue}
+                              className="px-4 py-2 rounded-md text-sm font-medium transition-colors"
+                              style={{ 
+                                backgroundColor: overdue ? THEME.reschedule : THEME.primary, 
+                                color: '#fff',
+                                opacity: overdue ? 0.8 : 1
+                              }}
+                            >
+                              {overdue ? 'Mark Done' : 'Complete'}
+                            </button>
+                          )}
+
+                          {overdue && !completedToday && (
+                            <button
+                              onClick={() => handleReschedule(habit.id)}
+                              className="mt-2 px-3 py-1 rounded text-xs font-medium border"
+                              style={{ borderColor: THEME.reschedule, color: THEME.reschedule }}
+                            >
+                              Reschedule (+24h)
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* New Habit View */}
+          {view === 'new' && (
+            <div className="p-6 rounded-lg shadow-sm" style={{ backgroundColor: THEME.card }}>
+              <h2 className="text-xl font-semibold mb-6" style={{ color: THEME.textPrimary }}>New Habit</h2>
+              <form onSubmit={handleSaveHabit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium mb-1" style={{ color: THEME.textSecondary }}>Habit Name</label>
+                  <input 
+                    type="text" 
+                    value={formName}
+                    onChange={(e) => setFormName(e.target.value)}
+                    className="w-full p-3 rounded-md border focus:outline-none focus:ring-2"
+                    style={{ borderColor: THEME.border, '--tw-ring-color': THEME.primary } as React.CSSProperties}
+                    placeholder="e.g., Read for 20 mins"
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1" style={{ color: THEME.textSecondary }}>Reminder Time</label>
+                  <input 
+                    type="datetime-local" 
+                    value={formTime}
+                    onChange={(e) => setFormTime(e.target.value)}
+                    className="w-full p-3 rounded-md border focus:outline-none"
+                    style={{ borderColor: THEME.border }}
+                  />
+                </div>
+                <div className="flex justify-end gap-3 pt-4">
+                  <button 
+                    type="button"
+                    onClick={() => setView('dashboard')}
+                    className="px-4 py-2 rounded-md"
+                    style={{ color: THEME.textSecondary }}
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit"
+                    style={{ backgroundColor: THEME.primary, color: '#fff' }}
+                    className="px-6 py-2 rounded-md shadow-sm hover:opacity-90"
+                  >
+                    Save
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+        </main>
+      </div>
+    </>
   );
 }
